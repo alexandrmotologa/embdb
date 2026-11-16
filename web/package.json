@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "lucide-react": "^0.475.0",
+    "puppeteer": "^25.17.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

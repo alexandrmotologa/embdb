@@ -344,7 +344,7 @@ export default function App() {
               </div>
 
               {/* Advanced Parameters */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px', paddingTop: '16px', borderTop: '1px solid #1f1f23' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', paddingTop: '16px', borderTop: '1px solid #1f1f23' }}>
                 <div>
                   <label style={{ fontSize: '12px', color: '#a1a1aa', display: 'block', marginBottom: '6px' }}>Search Engine Mode</label>
                   <div style={{ display: 'flex', gap: '4px', background: '#18181b', padding: '3px', borderRadius: '6px' }}>
@@ -540,7 +540,7 @@ export default function App() {
 
         {/* TAB 4: DOCUMENTS & INGESTION */}
         {activeTab === 'documents' && (
-          <div style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: '20px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '20px' }}>
             {/* Ingestion Form */}
             <div style={{ background: '#121215', border: '1px solid #27272a', borderRadius: '12px', padding: '20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
@@ -634,7 +634,7 @@ export default function App() {
               </p>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px' }}>
               <div style={{ background: '#121215', border: '1px solid #27272a', borderRadius: '12px', padding: '20px' }}>
                 <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 600, color: '#d4d4d8' }}>Registered MCP Agent Tools</h4>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -771,43 +771,195 @@ function VectorScatterCanvas({ points }: { points: ScatterPoint[] }) {
   );
 }
 
-// Knowledge Graph Component
+// Dynamic Knowledge Graph Component
 function KnowledgeGraphView() {
+  const [graphData, setGraphData] = useState<{ nodes: any[]; edges: any[] }>({ nodes: [], edges: [] });
+  const [selectedNode, setSelectedNode] = useState<any | null>(null);
+  const [fromNode, setFromNode] = useState('');
+  const [toNode, setToNode] = useState('');
+  const [relation, setRelation] = useState('RELATES_TO');
+  const [linking, setLinking] = useState(false);
+
+  const fetchGraph = async () => {
+    try {
+      const res = await fetch('/api/graph/all');
+      if (res.ok) {
+        const data = await res.json();
+        setGraphData({
+          nodes: data.nodes || [],
+          edges: data.edges || [],
+        });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    fetchGraph();
+  }, []);
+
+  const handleAddEdge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fromNode || !toNode) return;
+    setLinking(true);
+    try {
+      const res = await fetch('/api/graph/edges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: fromNode,
+          to: toNode,
+          relation: relation || 'RELATES_TO',
+          weight: 1.0,
+        }),
+      });
+      if (res.ok) {
+        setFromNode('');
+        setToNode('');
+        fetchGraph();
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  // Compute 2D node layout dynamically
+  const width = 800;
+  const height = 400;
+  const cx = width / 2;
+  const cy = height / 2;
+  const radius = 140;
+
+  const nodePositions = new Map<string, { x: number; y: number }>();
+  const totalNodes = graphData.nodes.length;
+
+  graphData.nodes.forEach((n, idx) => {
+    if (totalNodes === 1) {
+      nodePositions.set(n.id, { x: cx, y: cy });
+    } else {
+      const angle = (2 * Math.PI * idx) / totalNodes;
+      nodePositions.set(n.id, {
+        x: cx + radius * Math.cos(angle),
+        y: cy + radius * Math.sin(angle),
+      });
+    }
+  });
+
   return (
-    <div style={{ background: '#121215', border: '1px solid #27272a', borderRadius: '12px', padding: '24px', height: '450px', position: 'relative', overflow: 'hidden' }}>
-      <svg width="100%" height="100%" viewBox="0 0 800 400">
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#3f3f46" />
-          </marker>
-        </defs>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+      {/* Quick Edge Creator */}
+      <div style={{ background: '#121215', border: '1px solid #27272a', borderRadius: '12px', padding: '16px' }}>
+        <form onSubmit={handleAddEdge} style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '13px', fontWeight: 600, color: '#a1a1aa' }}>Connect Graph Entities:</span>
+          <select
+            value={fromNode}
+            onChange={e => setFromNode(e.target.value)}
+            style={{ padding: '6px 10px', background: '#18181b', border: '1px solid #27272a', borderRadius: '6px', color: '#fff', fontSize: '12px' }}
+          >
+            <option value="">Select From Node...</option>
+            {graphData.nodes.map(n => (
+              <option key={n.id} value={n.id}>{n.id}</option>
+            ))}
+          </select>
+          <span style={{ color: '#6366f1', fontWeight: 600 }}>&mdash;&gt;</span>
+          <input
+            type="text"
+            value={relation}
+            onChange={e => setRelation(e.target.value)}
+            placeholder="RELATION (e.g. CITES, MENTIONS)"
+            style={{ padding: '6px 10px', background: '#18181b', border: '1px solid #27272a', borderRadius: '6px', color: '#fff', fontSize: '12px' }}
+          />
+          <span style={{ color: '#6366f1', fontWeight: 600 }}>&mdash;&gt;</span>
+          <select
+            value={toNode}
+            onChange={e => setToNode(e.target.value)}
+            style={{ padding: '6px 10px', background: '#18181b', border: '1px solid #27272a', borderRadius: '6px', color: '#fff', fontSize: '12px' }}
+          >
+            <option value="">Select To Node...</option>
+            {graphData.nodes.map(n => (
+              <option key={n.id} value={n.id}>{n.id}</option>
+            ))}
+          </select>
+          <button
+            type="submit"
+            disabled={linking || !fromNode || !toNode}
+            style={{ padding: '6px 14px', background: '#6366f1', border: 'none', borderRadius: '6px', color: '#fff', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}
+          >
+            {linking ? 'Linking...' : 'Add Link'}
+          </button>
+        </form>
+      </div>
 
-        {/* Lines */}
-        <line x1="200" y1="200" x2="400" y2="120" stroke="#3f3f46" strokeWidth="2" markerEnd="url(#arrow)" />
-        <line x1="200" y1="200" x2="400" y2="280" stroke="#3f3f46" strokeWidth="2" markerEnd="url(#arrow)" />
-        <line x1="400" y1="120" x2="600" y2="200" stroke="#3f3f46" strokeWidth="2" markerEnd="url(#arrow)" />
-        <line x1="400" y1="280" x2="600" y2="200" stroke="#3f3f46" strokeWidth="2" markerEnd="url(#arrow)" />
+      <div style={{ background: '#121215', border: '1px solid #27272a', borderRadius: '12px', padding: '24px', height: '450px', position: 'relative', overflow: 'hidden' }}>
+        <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="22" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6366f1" />
+            </marker>
+          </defs>
 
-        {/* Nodes */}
-        <g transform="translate(200, 200)">
-          <circle r="24" fill="#1e1b4b" stroke="#6366f1" strokeWidth="2" />
-          <text fill="#fff" fontSize="11" textAnchor="middle" dy="4">doc:contract</text>
-        </g>
-        <g transform="translate(400, 120)">
-          <circle r="22" fill="#082f49" stroke="#38bdf8" strokeWidth="2" />
-          <text fill="#fff" fontSize="10" textAnchor="middle" dy="4">Acme Corp</text>
-        </g>
-        <g transform="translate(400, 280)">
-          <circle r="22" fill="#064e3b" stroke="#34d399" strokeWidth="2" />
-          <text fill="#fff" fontSize="10" textAnchor="middle" dy="4">Alice Smith</text>
-        </g>
-        <g transform="translate(600, 200)">
-          <circle r="24" fill="#312e81" stroke="#818cf8" strokeWidth="2" />
-          <text fill="#fff" fontSize="11" textAnchor="middle" dy="4">doc:invoice</text>
-        </g>
-      </svg>
-      <div style={{ position: 'absolute', bottom: '24px', left: '24px', fontSize: '12px', color: '#71717a' }}>
-        Entities and document chunk linkages mapped into multi-hop adjacency graph.
+          {/* Render Dynamic Edges */}
+          {graphData.edges.map((e, idx) => {
+            const pFrom = nodePositions.get(e.from);
+            const pTo = nodePositions.get(e.to);
+            if (!pFrom || !pTo) return null;
+            return (
+              <g key={idx}>
+                <line
+                  x1={pFrom.x}
+                  y1={pFrom.y}
+                  x2={pTo.x}
+                  y2={pTo.y}
+                  stroke="#4f46e5"
+                  strokeWidth="2"
+                  markerEnd="url(#arrow)"
+                  opacity="0.8"
+                />
+                <text
+                  x={(pFrom.x + pTo.x) / 2}
+                  y={(pFrom.y + pTo.y) / 2 - 4}
+                  fill="#818cf8"
+                  fontSize="9"
+                  textAnchor="middle"
+                >
+                  {e.relation}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Render Dynamic Nodes */}
+          {graphData.nodes.map(n => {
+            const pos = nodePositions.get(n.id);
+            if (!pos) return null;
+            const isSelected = selectedNode?.id === n.id;
+            return (
+              <g
+                key={n.id}
+                transform={`translate(${pos.x}, ${pos.y})`}
+                onClick={() => setSelectedNode(n)}
+                style={{ cursor: 'pointer' }}
+              >
+                <circle
+                  r={isSelected ? 26 : 20}
+                  fill={isSelected ? '#4338ca' : '#1e1b4b'}
+                  stroke={isSelected ? '#38bdf8' : '#6366f1'}
+                  strokeWidth={isSelected ? 3 : 2}
+                />
+                <text fill="#fff" fontSize="10" textAnchor="middle" dy="4">
+                  {n.id.length > 12 ? n.id.slice(0, 10) + '..' : n.id}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+
+        <div style={{ position: 'absolute', bottom: '24px', left: '24px', fontSize: '12px', color: '#71717a' }}>
+          {graphData.nodes.length} entities and {graphData.edges.length} relationships actively mapped in database memory.
+        </div>
       </div>
     </div>
   );

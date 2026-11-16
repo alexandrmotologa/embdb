@@ -5,9 +5,10 @@ bin/
 *.dll
 *.so
 *.dylib
-dist/
+/dist/
 build/
 web/dist/
+!internal/server/dist/
 
 # Test artifacts and coverage
 *.test

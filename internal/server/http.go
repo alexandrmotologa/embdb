@@ -13,6 +13,7 @@ import (
 
 	"github.com/alexandrmotologa/embdb/internal/embeddings"
 	"github.com/alexandrmotologa/embdb/internal/engine"
+	"github.com/alexandrmotologa/embdb/internal/graph"
 	"github.com/alexandrmotologa/embdb/internal/mcp"
 )
 
@@ -53,6 +54,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/search", s.handleSearch)
 	mux.HandleFunc("POST /api/query/sql", s.handleSQL)
 	mux.HandleFunc("GET /api/graph/traverse", s.handleGraphTraverse)
+	mux.HandleFunc("GET /api/graph/all", s.handleGraphAll)
+	mux.HandleFunc("POST /api/graph/edges", s.handleAddGraphEdge)
 	mux.HandleFunc("GET /api/vectors/scatter", s.handleVectorScatter)
 	mux.HandleFunc("GET /api/vectors/clusters", s.handleVectorClusters)
 
@@ -323,6 +326,48 @@ func (s *Server) handleGraphTraverse(w http.ResponseWriter, r *http.Request) {
 
 	subgraph := s.db.KnowledgeGraph().TraverseBFS([]string{startNode}, hops, 0.1)
 	s.jsonResponse(w, http.StatusOK, subgraph)
+}
+
+func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
+	kg := s.db.KnowledgeGraph()
+	s.jsonResponse(w, http.StatusOK, map[string]any{
+		"nodes": kg.Nodes(),
+		"edges": kg.Edges(),
+	})
+}
+
+func (s *Server) handleAddGraphEdge(w http.ResponseWriter, r *http.Request) {
+	type edgeReq struct {
+		From     string  `json:"from"`
+		To       string  `json:"to"`
+		Relation string  `json:"relation"`
+		Weight   float32 `json:"weight"`
+	}
+
+	var req edgeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid edge json payload")
+		return
+	}
+
+	if req.From == "" || req.To == "" {
+		s.jsonError(w, http.StatusBadRequest, "'from' and 'to' fields are required")
+		return
+	}
+
+	if req.Relation == "" {
+		req.Relation = "RELATED_TO"
+	}
+
+	s.db.KnowledgeGraph().AddEdge(graph.Edge{
+		From:     req.From,
+		To:       req.To,
+		Relation: req.Relation,
+		Weight:   req.Weight,
+	})
+
+	s.broadcastEvent(fmt.Sprintf(`{"event": "graph_edge_added", "from": "%s", "to": "%s"}`, req.From, req.To))
+	s.jsonResponse(w, http.StatusCreated, map[string]any{"status": "edge_created"})
 }
 
 func (s *Server) handleVectorScatter(w http.ResponseWriter, r *http.Request) {
