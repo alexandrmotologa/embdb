@@ -1,72 +1,90 @@
 # embdb
 
-Embedded hybrid vector and semantic database written in Go with single-file storage, HNSW dense indexing, BM25 sparse retrieval, and native Model Context Protocol support.
+Embedded hybrid vector and semantic database in Go with single-file storage, HNSW indexing, BM25 retrieval, and native Model Context Protocol support.
 
 ## Overview
 
-embdb is an in-process, zero-network vector search engine designed for local AI agents, CLI utilities, and serverless environments. It packages dense vector similarity, sparse lexical search, relational metadata filtering, and entity relationship graphs into a single portable binary and a single container file.
+embdb is an in-process search database designed for local AI agents, CLI tools, and low-resource environments. It combines dense vector similarity, sparse lexical keyword matching, metadata filtering, and entity relationship graphs into a single portable binary and a single container file (`.embdb`).
 
 ### Key Capabilities
 
-* Single-file container format (`.embdb`) using memory-mapped pages for zero-copy queries
-* Dense vector indexing via Hierarchical Navigable Small World (HNSW) graphs with AVX2 SIMD acceleration and SQ8 scalar quantization
-* Lexical text retrieval via Okapi BM25 with Roaring Bitmaps for inverted index operations
-* Hybrid ranking fusion using Reciprocal Rank Fusion (RRF) to merge semantic and keyword results
-* Relational metadata filtering with B-Tree indices supporting range and equality predicates
-* Entity knowledge graph traversal for multi-hop graph-augmented generation
-* Built-in Model Context Protocol (MCP) server supporting stdio and Server-Sent Events (SSE)
-* Embedded web-based Vector Studio running on local port 8383
-
-## Storage Architecture
-
-embdb encapsulates all indices and document payloads into one structured binary file:
-
-```
-+-------------------------------------------------------------------+
-| Header (Magic, Dimensions, Metric, Quantization Mode, Counters)   |
-+-------------------------------------------------------------------+
-| HNSW Graph Nodes, Layers, and Vector Vectors Storage              |
-+-------------------------------------------------------------------+
-| BM25 Lexical Inverted Postings Lists and Term Dictionary          |
-+-------------------------------------------------------------------+
-| Relational Metadata B-Tree Root and Secondary Index Pages         |
-+-------------------------------------------------------------------+
-| Entity Relationship Graph Adjacency Records                       |
-+-------------------------------------------------------------------+
-| 4KB Memory-Mapped Slotted Document Pages                          |
-+-------------------------------------------------------------------+
-```
-
-A Write-Ahead Log (WAL) ensures durability across unexpected restarts, using CRC32 checksums on all written records.
+* **Single-File Container Format (`.embdb`)**: Uses 4KB slotted pages and memory-mapped reads for low latency.
+* **Dense Vector Indexing**: Hierarchical Navigable Small World (HNSW) graph with AVX2 SIMD acceleration and SQ8 scalar quantization.
+* **Lexical Text Retrieval**: Okapi BM25 engine with Unicode tokenization, stemming, and 64-bit word bitsets.
+* **Hybrid Ranking Fusion**: Merges dense and sparse result lists using Reciprocal Rank Fusion (RRF).
+* **Metadata Filtering**: Relational B-Tree index supporting exact, range, and compound predicate evaluation.
+* **Knowledge Graph Traversal**: Directed entity adjacency index for multi-hop graph-augmented generation.
+* **Native Model Context Protocol (MCP)**: Embedded JSON-RPC 2.0 server for Claude Code, Antigravity, and Cursor.
+* **Embedded Vector Studio**: Bundled React 19 interface compiled directly into the Go binary on port 8383.
 
 ## Quick Start
 
 ### Installation
 
 ```bash
-go get github.com/alexandrmotologa/embdb
+go install github.com/alexandrmotologa/embdb/cmd/embdb@latest
 ```
 
-### CLI Usage
+Or clone and build locally:
 
-Start the embedded studio and HTTP API:
+```bash
+git clone https://github.com/alexandrmotologa/embdb.git
+cd embdb
+go build -o bin/embdb ./cmd/embdb
+```
+
+### Start the Embedded Studio & API
 
 ```bash
 embdb serve --db data.embdb --port 8383
 ```
 
-Run as an MCP server for AI agents:
+Open `http://localhost:8383` in your browser to view the interactive 3D vector scatter plot, hybrid search tester, and knowledge graph viewer.
 
-```bash
-embdb mcp --db data.embdb
+### Connect AI Agents via MCP
+
+Add the following to your agent configuration:
+
+```json
+{
+  "mcpServers": {
+    "embdb": {
+      "command": "embdb",
+      "args": ["mcp", "--db", "agent_memory.embdb"]
+    }
+  }
+}
 ```
 
-Query via command line:
+### CLI Search
 
 ```bash
-embdb query --db data.embdb --query "hybrid search query" --limit 10
+embdb query --db data.embdb --query "contract liability" --mode hybrid --limit 5
 ```
+
+### Bulk Ingestion
+
+```bash
+embdb index --db data.embdb --file examples/datasets/enterprise_faq.jsonl
+```
+
+## Performance Highlights
+
+* **Binary Size**: 10.2 MB (single binary including full React 19 Studio)
+* **Cold Start**: < 3 ms
+* **Insertion Rate**: 2,250+ documents / second
+* **Search Latency**: 0.38 ms average per hybrid query (2,600+ QPS)
+
+See [docs/benchmarks.md](docs/benchmarks.md) for full benchmark methodology.
+
+## Documentation
+
+* [Architecture Specification](docs/architecture.md)
+* [Model Context Protocol Guide](docs/mcp-guide.md)
+* [REST API Reference](docs/api-reference.md)
+* [Performance Benchmarks](docs/benchmarks.md)
+* [Embedded Library Example](examples/basic_usage.go)
 
 ## License
 
-MIT License. See LICENSE file for details.
+MIT License. See LICENSE for details.

@@ -150,4 +150,20 @@ func TestDatabaseEngineIntegration(t *testing.T) {
 	if stats.TotalDocuments != 3 {
 		t.Fatalf("expected 3 documents in stats, got %d", stats.TotalDocuments)
 	}
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen database and verify persistent documents
+	db2, err := OpenDB(dbPath, 4, 0, 0)
+	if err != nil {
+		t.Fatalf("failed to reopen DB: %v", err)
+	}
+	defer db2.Close()
+
+	stats2 := db2.Stats()
+	if stats2.TotalDocuments != 3 {
+		t.Fatalf("expected 3 documents after reopening, got %d", stats2.TotalDocuments)
+	}
 }

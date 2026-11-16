@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alexandrmotologa/embdb/internal/bm25"
+	"github.com/alexandrmotologa/embdb/internal/embeddings"
 	"github.com/alexandrmotologa/embdb/internal/graph"
 	"github.com/alexandrmotologa/embdb/internal/hnsw"
 	"github.com/alexandrmotologa/embdb/internal/metadata"
@@ -105,6 +107,54 @@ func OpenDB(path string, dim int, metric uint32, quant uint32) (*DB, error) {
 		dim:       actualDim,
 	}
 
+	// Reconstruct indices from persisted slotted pages
+	embedder := embeddings.NewDeterministicAdapter(actualDim)
+	var maxID uint64
+	for pID := uint32(1); pID < h.TotalPages; pID++ {
+		page, err := c.ReadPage(pID)
+		if err != nil {
+			continue
+		}
+		if page.Type() != storage.PageTypeData {
+			continue
+		}
+		itemCount := page.ItemCount()
+		for s := uint16(0); s < itemCount; s++ {
+			itemBytes, err := page.GetItem(s)
+			if err != nil || len(itemBytes) == 0 {
+				continue
+			}
+			var doc Document
+			if err := json.Unmarshal(itemBytes, &doc); err != nil {
+				continue
+			}
+			if len(doc.Vector) == 0 && doc.Text != "" {
+				vec, _ := embedder.Embed(context.Background(), doc.Text)
+				doc.Vector = vec
+			}
+			if doc.ID > maxID {
+				maxID = doc.ID
+			}
+			db.docs[doc.ID] = &doc
+			if doc.Key != "" {
+				db.keyToID[doc.Key] = doc.ID
+			}
+			if len(doc.Vector) > 0 {
+				_ = db.hnsw.Insert(doc.ID, hnsw.Normalize(doc.Vector))
+			}
+			if doc.Text != "" {
+				db.bm25.IndexDocument(doc.ID, doc.Text)
+			}
+			db.kg.AddNode(graph.Node{
+				ID:         doc.Key,
+				DocID:      doc.ID,
+				Type:       "Document",
+				Properties: doc.Metadata,
+			})
+		}
+	}
+	db.autoID.Store(maxID)
+
 	return db, nil
 }
 
@@ -157,12 +207,48 @@ func (db *DB) Insert(doc *Document) error {
 	}
 
 	// Write to slotted page container
-	dataBytes, _ := json.Marshal(doc)
-	page, err := db.container.AllocatePage(storage.PageTypeData)
-	if err == nil {
-		_, _ = page.InsertItem(dataBytes)
-		_ = db.container.WritePage(page)
+	type docPayload struct {
+		ID        uint64         `json:"id"`
+		Key       string         `json:"key"`
+		Text      string         `json:"text"`
+		Metadata  map[string]any `json:"metadata,omitempty"`
+		CreatedAt int64          `json:"created_at"`
 	}
+	payload := docPayload{
+		ID:        doc.ID,
+		Key:       doc.Key,
+		Text:      doc.Text,
+		Metadata:  doc.Metadata,
+		CreatedAt: doc.CreatedAt,
+	}
+	dataBytes, _ := json.Marshal(payload)
+
+	// Try inserting into last allocated page or allocate new page
+	h := db.container.Header()
+	var page *storage.Page
+	var err error
+	if h.TotalPages > 1 {
+		page, err = db.container.ReadPage(h.TotalPages - 1)
+	}
+
+	if page == nil || err != nil || page.Type() != storage.PageTypeData {
+		page, err = db.container.AllocatePage(storage.PageTypeData)
+	}
+
+	if page != nil && err == nil {
+		_, insertErr := page.InsertItem(dataBytes)
+		if errors.Is(insertErr, storage.ErrPageFull) {
+			// Allocate a new page if current page is full
+			page, err = db.container.AllocatePage(storage.PageTypeData)
+			if err == nil {
+				_, _ = page.InsertItem(dataBytes)
+				_ = db.container.WritePage(page)
+			}
+		} else if insertErr == nil {
+			_ = db.container.WritePage(page)
+		}
+	}
+	_ = db.container.SetTotalDocuments(uint64(len(db.docs)))
 
 	return nil
 }

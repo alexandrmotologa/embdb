@@ -210,6 +210,21 @@ func (c *Container) deserializeHeader(buf []byte) error {
 	return nil
 }
 
+// SetTotalDocuments updates the total document count in the header.
+func (c *Container) SetTotalDocuments(count uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.header.TotalDocuments = count
+	c.header.ModifiedAt = time.Now().Unix()
+
+	headerPage := NewPage(0, PageTypeHeader)
+	c.serializeHeader(headerPage.Data[:])
+	headerPage.UpdateChecksum()
+	_, err := c.file.WriteAt(headerPage.Data[:], 0)
+	return err
+}
+
 // AllocatePage creates a new page in the container.
 func (c *Container) AllocatePage(pageType uint16) (*Page, error) {
 	c.mu.Lock()

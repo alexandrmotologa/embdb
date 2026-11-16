@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "embdb": {
+      "command": "embdb",
+      "args": ["mcp", "--db", "agent_memory.embdb"]
+    }
+  }
+}
