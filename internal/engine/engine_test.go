@@ -1,0 +1,153 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestRRF(t *testing.T) {
+	dense := []RankItem{
+		{DocID: 1, DenseScore: 0.95},
+		{DocID: 2, DenseScore: 0.85},
+		{DocID: 3, DenseScore: 0.70},
+	}
+	sparse := []RankItem{
+		{DocID: 2, SparseScore: 4.5},
+		{DocID: 4, SparseScore: 3.2},
+		{DocID: 1, SparseScore: 2.1},
+	}
+
+	fused := ReciprocalRankFusion(dense, sparse, 0.5, 0.5, 60)
+	if len(fused) != 4 {
+		t.Fatalf("expected 4 merged items, got %d", len(fused))
+	}
+
+	// Doc 2 appears at rank 2 in dense and rank 1 in sparse -> should have high score
+	if fused[0].DocID != 2 && fused[0].DocID != 1 {
+		t.Fatalf("expected doc 1 or 2 to be top ranked, got doc %d", fused[0].DocID)
+	}
+}
+
+func TestSQLParser(t *testing.T) {
+	q, err := ParseSQL("SELECT id, text, score FROM documents WHERE category = 'legal' AND year >= 2024 ORDER BY hybrid('contract breach') LIMIT 5 OFFSET 2")
+	if err != nil {
+		t.Fatalf("failed to parse SQL: %v", err)
+	}
+
+	if q.Collection != "documents" {
+		t.Fatalf("expected collection 'documents', got '%s'", q.Collection)
+	}
+	if len(q.Fields) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(q.Fields))
+	}
+	if q.Limit != 5 {
+		t.Fatalf("expected limit 5, got %d", q.Limit)
+	}
+	if q.Offset != 2 {
+		t.Fatalf("expected offset 2, got %d", q.Offset)
+	}
+	if q.Order.Mode != OrderModeHybrid {
+		t.Fatalf("expected hybrid order mode, got %v", q.Order.Mode)
+	}
+	if q.Order.QueryText != "contract breach" {
+		t.Fatalf("expected query 'contract breach', got '%s'", q.Order.QueryText)
+	}
+}
+
+func TestDatabaseEngineIntegration(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "embdb-engine-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "test.embdb")
+	db, err := OpenDB(dbPath, 4, 0, 0)
+	if err != nil {
+		t.Fatalf("failed to open DB: %v", err)
+	}
+	defer db.Close()
+
+	doc1 := &Document{
+		Key:    "doc_legal_1",
+		Text:   "Non-disclosure agreement and liability confidentiality clause",
+		Vector: []float32{1.0, 0.0, 0.0, 0.0},
+		Metadata: map[string]any{
+			"category": "legal",
+			"priority": 1,
+		},
+	}
+	doc2 := &Document{
+		Key:    "doc_legal_2",
+		Text:   "Intellectual property assignment and patent licensing terms",
+		Vector: []float32{0.0, 1.0, 0.0, 0.0},
+		Metadata: map[string]any{
+			"category": "legal",
+			"priority": 2,
+		},
+	}
+	doc3 := &Document{
+		Key:    "doc_tech_1",
+		Text:   "High performance distributed vector search algorithms",
+		Vector: []float32{0.0, 0.0, 1.0, 0.0},
+		Metadata: map[string]any{
+			"category": "tech",
+			"priority": 1,
+		},
+	}
+
+	if err := db.Insert(doc1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Insert(doc2); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Insert(doc3); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Vector Search
+	vecResults, err := db.SearchVector([]float32{1.0, 0.0, 0.0, 0.0}, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vecResults) == 0 || vecResults[0].Key != "doc_legal_1" {
+		t.Fatalf("expected doc_legal_1 as top vector match, got %v", vecResults)
+	}
+
+	// 2. BM25 Search
+	bmResults, err := db.SearchBM25("patent licensing", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bmResults) == 0 || bmResults[0].Key != "doc_legal_2" {
+		t.Fatalf("expected doc_legal_2 as top bm25 match, got %v", bmResults)
+	}
+
+	// 3. Hybrid Search
+	hybridResults, err := db.SearchHybrid("confidentiality", []float32{1.0, 0.0, 0.0, 0.0}, 2, nil, 0.6, 0.4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hybridResults) == 0 || hybridResults[0].Key != "doc_legal_1" {
+		t.Fatalf("expected doc_legal_1 as top hybrid match, got %v", hybridResults)
+	}
+
+	// 4. SQL Execution
+	sqlRes, err := db.ExecuteSQL("SELECT id, key, text FROM documents WHERE category = 'legal' ORDER BY bm25('patent') LIMIT 5", nil)
+	if err != nil {
+		t.Fatalf("SQL query failed: %v", err)
+	}
+	if sqlRes.TotalHits == 0 {
+		t.Fatal("expected SQL hits, got 0")
+	}
+	if sqlRes.Rows[0]["key"] != "doc_legal_2" {
+		t.Fatalf("expected doc_legal_2 in SQL query, got %v", sqlRes.Rows[0]["key"])
+	}
+
+	stats := db.Stats()
+	if stats.TotalDocuments != 3 {
+		t.Fatalf("expected 3 documents in stats, got %d", stats.TotalDocuments)
+	}
+}
