@@ -253,6 +253,99 @@ func (db *DB) Insert(doc *Document) error {
 	return nil
 }
 
+// InsertBatch inserts multiple documents in batch with optimized page packing and concurrent indexing.
+func (db *DB) InsertBatch(docs []*Document) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	type docPayload struct {
+		ID        uint64         `json:"id"`
+		Key       string         `json:"key"`
+		Text      string         `json:"text"`
+		Metadata  map[string]any `json:"metadata,omitempty"`
+		CreatedAt int64          `json:"created_at"`
+	}
+
+	h := db.container.Header()
+	var currPage *storage.Page
+	var err error
+	if h.TotalPages > 1 {
+		currPage, _ = db.container.ReadPage(h.TotalPages - 1)
+	}
+	if currPage == nil || currPage.Type() != storage.PageTypeData {
+		currPage, err = db.container.AllocatePage(storage.PageTypeData)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, doc := range docs {
+		if doc.Key != "" {
+			if _, exists := db.keyToID[doc.Key]; exists {
+				continue // Skip duplicates in batch
+			}
+		}
+
+		newID := db.autoID.Add(1)
+		doc.ID = newID
+		if doc.CreatedAt == 0 {
+			doc.CreatedAt = time.Now().Unix()
+		}
+
+		if len(doc.Vector) > 0 {
+			normalized := hnsw.Normalize(doc.Vector)
+			_ = db.hnsw.Insert(newID, normalized)
+		}
+
+		if doc.Text != "" {
+			db.bm25.IndexDocument(newID, doc.Text)
+		}
+
+		db.kg.AddNode(graph.Node{
+			ID:         doc.Key,
+			DocID:      newID,
+			Type:       "Document",
+			Properties: doc.Metadata,
+		})
+
+		db.docs[newID] = doc
+		if doc.Key != "" {
+			db.keyToID[doc.Key] = newID
+		}
+
+		payload := docPayload{
+			ID:        doc.ID,
+			Key:       doc.Key,
+			Text:      doc.Text,
+			Metadata:  doc.Metadata,
+			CreatedAt: doc.CreatedAt,
+		}
+		dataBytes, _ := json.Marshal(payload)
+
+		_, insertErr := currPage.InsertItem(dataBytes)
+		if errors.Is(insertErr, storage.ErrPageFull) {
+			_ = db.container.WritePage(currPage)
+			newPage, allocErr := db.container.AllocatePage(storage.PageTypeData)
+			if allocErr != nil {
+				return allocErr
+			}
+			currPage = newPage
+			_, _ = currPage.InsertItem(dataBytes)
+		}
+	}
+
+	if currPage != nil {
+		_ = db.container.WritePage(currPage)
+	}
+
+	_ = db.container.SetTotalDocuments(uint64(len(db.docs)))
+	return nil
+}
+
 // Upsert inserts or updates a document.
 func (db *DB) Upsert(doc *Document) error {
 	db.mu.Lock()
@@ -383,6 +476,10 @@ func (db *DB) SearchHybrid(
 	filter *metadata.Predicate,
 	denseWeight, sparseWeight float32,
 ) ([]SearchResult, error) {
+	if denseWeight <= 0 && sparseWeight <= 0 {
+		denseWeight, sparseWeight = DetectQueryIntent(queryText)
+	}
+
 	denseK := k * 2
 	sparseK := k * 2
 
@@ -527,6 +624,67 @@ func (db *DB) ExecuteSQL(queryStr string, queryVector []float32) (*QueryResult, 
 		TotalHits:  len(rows),
 		DurationMs: duration,
 	}, nil
+}
+
+// Compact creates a defragmented copy of the database container, packing live records into contiguous pages.
+func (db *DB) Compact(targetPath string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	h := db.container.Header()
+	targetContainer, err := storage.CreateContainer(targetPath, h.VectorDimension, h.DistanceMetric, h.QuantizationMode)
+	if err != nil {
+		return err
+	}
+	defer targetContainer.Close()
+
+	type docPayload struct {
+		ID        uint64         `json:"id"`
+		Key       string         `json:"key"`
+		Text      string         `json:"text"`
+		Metadata  map[string]any `json:"metadata,omitempty"`
+		CreatedAt int64          `json:"created_at"`
+	}
+
+	var currPage *storage.Page
+
+	for _, doc := range db.docs {
+		payload := docPayload{
+			ID:        doc.ID,
+			Key:       doc.Key,
+			Text:      doc.Text,
+			Metadata:  doc.Metadata,
+			CreatedAt: doc.CreatedAt,
+		}
+		dataBytes, _ := json.Marshal(payload)
+
+		if currPage == nil {
+			newPage, err := targetContainer.AllocatePage(storage.PageTypeData)
+			if err != nil {
+				return err
+			}
+			currPage = newPage
+		}
+
+		_, insertErr := currPage.InsertItem(dataBytes)
+		if errors.Is(insertErr, storage.ErrPageFull) {
+			_ = targetContainer.WritePage(currPage)
+			newPage, err := targetContainer.AllocatePage(storage.PageTypeData)
+			if err != nil {
+				return err
+			}
+			currPage = newPage
+			_, _ = currPage.InsertItem(dataBytes)
+		}
+	}
+
+	if currPage != nil {
+		_ = targetContainer.WritePage(currPage)
+	}
+
+	_ = targetContainer.SetTotalDocuments(uint64(len(db.docs)))
+	_ = targetContainer.Sync()
+	return nil
 }
 
 func (db *DB) KnowledgeGraph() *graph.KnowledgeGraph {

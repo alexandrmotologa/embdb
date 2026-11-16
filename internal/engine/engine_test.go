@@ -1,10 +1,94 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestDatabaseCompaction(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "embdb-compact-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "original.embdb")
+	db, err := OpenDB(dbPath, 4, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		_ = db.Insert(&Document{
+			Key:  fmt.Sprintf("doc_%d", i),
+			Text: fmt.Sprintf("Text content %d", i),
+		})
+	}
+
+	compactPath := filepath.Join(tempDir, "compacted.embdb")
+	if err := db.Compact(compactPath); err != nil {
+		t.Fatalf("compact failed: %v", err)
+	}
+	_ = db.Close()
+
+	// Verify compacted DB opens cleanly and has all 10 documents
+	dbCompact, err := OpenDB(compactPath, 4, 0, 0)
+	if err != nil {
+		t.Fatalf("failed to open compacted db: %v", err)
+	}
+	defer dbCompact.Close()
+
+	if dbCompact.Stats().TotalDocuments != 10 {
+		t.Fatalf("expected 10 documents in compacted db, got %d", dbCompact.Stats().TotalDocuments)
+	}
+}
+
+func TestComputeClusters(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "embdb-cluster-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "cluster.embdb")
+	db, err := OpenDB(dbPath, 4, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Cluster A docs
+	_ = db.Insert(&Document{Key: "legal_1", Text: "contract terms and liability", Vector: []float32{1, 0, 0, 0}})
+	_ = db.Insert(&Document{Key: "legal_2", Text: "breach of contract clause", Vector: []float32{0.9, 0.1, 0, 0}})
+
+	// Cluster B docs
+	_ = db.Insert(&Document{Key: "tech_1", Text: "vector indexing and hardware registers", Vector: []float32{0, 0, 1, 0}})
+	_ = db.Insert(&Document{Key: "tech_2", Text: "simd acceleration and memory buffers", Vector: []float32{0, 0, 0.9, 0.1}})
+
+	res := db.ComputeClusters(2, 10)
+	if len(res.Clusters) != 2 {
+		t.Fatalf("expected 2 clusters, got %d", len(res.Clusters))
+	}
+	if res.TotalDocs != 4 {
+		t.Fatalf("expected 4 clustered docs, got %d", res.TotalDocs)
+	}
+}
+
+func TestDetectQueryIntent(t *testing.T) {
+	// Technical / code / exact identifier query -> should favor BM25 sparse
+	denseW, sparseW := DetectQueryIntent("error_code_500 AES-256")
+	if sparseW <= denseW {
+		t.Fatalf("expected sparse weight to exceed dense weight for technical code query, got dense: %f, sparse: %f", denseW, sparseW)
+	}
+
+	// Natural language conceptual question -> should favor HNSW dense
+	denseW2, sparseW2 := DetectQueryIntent("what is the architectural difference between relational databases and graph models?")
+	if denseW2 <= sparseW2 {
+		t.Fatalf("expected dense weight to exceed sparse weight for conceptual question, got dense: %f, sparse: %f", denseW2, sparseW2)
+	}
+}
 
 func TestRRF(t *testing.T) {
 	dense := []RankItem{

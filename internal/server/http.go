@@ -46,12 +46,15 @@ func (s *Server) Routes() http.Handler {
 	// REST Endpoints
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("POST /api/documents", s.handleInsertDocument)
+	mux.HandleFunc("POST /api/documents/batch", s.handleInsertDocumentsBatch)
 	mux.HandleFunc("GET /api/documents", s.handleListDocuments)
 	mux.HandleFunc("POST /api/search", s.handleSearch)
 	mux.HandleFunc("POST /api/query/sql", s.handleSQL)
 	mux.HandleFunc("GET /api/graph/traverse", s.handleGraphTraverse)
 	mux.HandleFunc("GET /api/vectors/scatter", s.handleVectorScatter)
+	mux.HandleFunc("GET /api/vectors/clusters", s.handleVectorClusters)
 
 	// MCP HTTP Endpoint
 	mux.HandleFunc("POST /mcp", s.mcpServer.HandleHTTP)
@@ -164,6 +167,46 @@ func (s *Server) handleInsertDocument(w http.ResponseWriter, r *http.Request) {
 
 	s.broadcastEvent(fmt.Sprintf(`{"event": "document_indexed", "key": "%s", "id": %d}`, doc.Key, doc.ID))
 	s.jsonResponse(w, http.StatusCreated, doc)
+}
+
+func (s *Server) handleInsertDocumentsBatch(w http.ResponseWriter, r *http.Request) {
+	type docItem struct {
+		Key      string         `json:"key"`
+		Text     string         `json:"text"`
+		Vector   []float32      `json:"vector,omitempty"`
+		Metadata map[string]any `json:"metadata,omitempty"`
+	}
+
+	var reqItems []docItem
+	if err := json.NewDecoder(r.Body).Decode(&reqItems); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid json payload for batch documents")
+		return
+	}
+
+	docs := make([]*engine.Document, len(reqItems))
+	for i, item := range reqItems {
+		vec := item.Vector
+		if len(vec) == 0 && item.Text != "" {
+			vec, _ = s.embedder.Embed(r.Context(), item.Text)
+		}
+		docs[i] = &engine.Document{
+			Key:      item.Key,
+			Text:     item.Text,
+			Vector:   vec,
+			Metadata: item.Metadata,
+		}
+	}
+
+	if err := s.db.InsertBatch(docs); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.broadcastEvent(fmt.Sprintf(`{"event": "batch_indexed", "count": %d}`, len(docs)))
+	s.jsonResponse(w, http.StatusCreated, map[string]any{
+		"indexed": len(docs),
+		"status":  "success",
+	})
 }
 
 func (s *Server) handleListDocuments(w http.ResponseWriter, r *http.Request) {
@@ -322,6 +365,17 @@ func (s *Server) handleVectorScatter(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.jsonResponse(w, http.StatusOK, points)
+}
+
+func (s *Server) handleVectorClusters(w http.ResponseWriter, r *http.Request) {
+	k := 3
+	if kStr := r.URL.Query().Get("k"); kStr != "" {
+		if val, err := strconv.Atoi(kStr); err == nil && val > 0 {
+			k = val
+		}
+	}
+	result := s.db.ComputeClusters(k, 15)
+	s.jsonResponse(w, http.StatusOK, result)
 }
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {

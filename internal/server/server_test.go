@@ -39,6 +39,14 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK from health, got %d", w.Code)
 	}
 
+	// 1b. Prometheus Metrics
+	reqMetrics := httptest.NewRequest("GET", "/metrics", nil)
+	wMetrics := httptest.NewRecorder()
+	handler.ServeHTTP(wMetrics, reqMetrics)
+	if wMetrics.Code != http.StatusOK || !bytes.Contains(wMetrics.Body.Bytes(), []byte("embdb_documents_total")) {
+		t.Fatalf("expected 200 OK and embdb_documents_total from /metrics, got %d", wMetrics.Code)
+	}
+
 	// 2. Stats
 	reqStats := httptest.NewRequest("GET", "/api/stats", nil)
 	wStats := httptest.NewRecorder()

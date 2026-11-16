@@ -61,6 +61,9 @@ export default function App() {
   // 3D Points
   const [points, setPoints] = useState<ScatterPoint[]>([]);
 
+  // Clusters
+  const [clusters, setClusters] = useState<{ id: number; label: string; doc_count: number; doc_keys: string[] }[]>([]);
+
   // Fetch Stats
   const fetchStats = async () => {
     try {
@@ -103,10 +106,24 @@ export default function App() {
     }
   };
 
+  // Fetch Semantic Clusters
+  const fetchClusters = async () => {
+    try {
+      const res = await fetch('/api/vectors/clusters?k=3');
+      if (res.ok) {
+        const data = await res.json();
+        setClusters(data.clusters || []);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(() => {
     fetchStats();
     fetchDocs();
     fetchScatter();
+    fetchClusters();
   }, []);
 
   // Perform Search
@@ -488,10 +505,24 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>3D Vector Embedding Space</h3>
-                <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#71717a' }}>Interactive coordinate projection of indexed high-dimensional vector embeddings.</p>
+                <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#71717a' }}>Interactive coordinate projection of indexed high-dimensional vector embeddings with k-Means topic discovery.</p>
               </div>
               <span style={{ fontSize: '12px', color: '#a1a1aa' }}>Total Vectors: {points.length}</span>
             </div>
+
+            {/* Semantic Topic Clusters */}
+            {clusters.length > 0 && (
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                {clusters.map((c, i) => (
+                  <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#18181b', border: '1px solid #27272a', padding: '6px 12px', borderRadius: '6px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: i === 0 ? '#818cf8' : i === 1 ? '#38bdf8' : '#34d399' }}></span>
+                    <span style={{ fontSize: '12px', fontWeight: 600, color: '#f4f4f5' }}>{c.label}</span>
+                    <span style={{ fontSize: '11px', color: '#71717a' }}>({c.doc_count} docs)</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <VectorScatterCanvas points={points} />
           </div>
         )}

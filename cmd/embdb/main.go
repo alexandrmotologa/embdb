@@ -47,6 +47,14 @@ func main() {
 		cmdStats(os.Args[2:])
 	case "bench":
 		cmdBench(os.Args[2:])
+	case "shell":
+		cmdShell(os.Args[2:])
+	case "compact":
+		cmdCompact(os.Args[2:])
+	case "dump":
+		cmdDump(os.Args[2:])
+	case "restore":
+		cmdRestore(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", subcommand)
 		printUsage()
@@ -59,9 +67,13 @@ func printUsage() {
 	fmt.Println("Usage: embdb <command> [options]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  serve    Start embedded Vector Studio & REST API server")
+	fmt.Println("  shell    Launch interactive SQL & semantic query terminal REPL")
 	fmt.Println("  mcp      Run Model Context Protocol (MCP) server over stdio")
 	fmt.Println("  query    Execute vector, keyword, or hybrid search from CLI")
 	fmt.Println("  index    Bulk ingest documents from JSONL or single text")
+	fmt.Println("  compact  Defragment and shrink database file on disk")
+	fmt.Println("  dump     Export all documents and graph data to portable JSONL")
+	fmt.Println("  restore  Rebuild database container from JSONL dump")
 	fmt.Println("  stats    Inspect database page count, vector dim, and health")
 	fmt.Println("  bench    Run local latency and throughput benchmarks")
 }
@@ -376,4 +388,270 @@ func cmdBench(args []string) {
 	qps := float64(numQueries) / queryDuration.Seconds()
 
 	fmt.Printf("Hybrid Search: %d queries in %s (Average Latency: %.2f ms, %.1f QPS)\n", numQueries, queryDuration, avgLatency, qps)
+}
+
+func cmdCompact(args []string) {
+	fs := flag.NewFlagSet("compact", flag.ExitOnError)
+	dbPath := fs.String("db", "data.embdb", "Path to source .embdb file")
+	outPath := fs.String("out", "", "Path to compacted file (defaults to in-place replacement)")
+	fs.Parse(args)
+
+	target := *outPath
+	replace := false
+	if target == "" {
+		target = *dbPath + ".compact.tmp"
+		replace = true
+	}
+
+	db, err := engine.OpenDB(*dbPath, 384, storage.MetricCosine, storage.QuantizeNone)
+	if err != nil {
+		fmt.Printf("Error opening db: %v\n", err)
+		os.Exit(1)
+	}
+
+	start := time.Now()
+	if err := db.Compact(target); err != nil {
+		db.Close()
+		fmt.Printf("Compaction failed: %v\n", err)
+		os.Exit(1)
+	}
+	db.Close()
+
+	if replace {
+		_ = os.Remove(*dbPath)
+		_ = os.Remove(*dbPath + "-wal")
+		_ = os.Rename(target, *dbPath)
+		fmt.Printf("Database successfully compacted in-place in %s\n", time.Since(start))
+	} else {
+		fmt.Printf("Database compacted to %s in %s\n", target, time.Since(start))
+	}
+}
+
+func cmdDump(args []string) {
+	fs := flag.NewFlagSet("dump", flag.ExitOnError)
+	dbPath := fs.String("db", "data.embdb", "Path to source .embdb file")
+	outFile := fs.String("out", "dump.jsonl", "Output dump file path")
+	fs.Parse(args)
+
+	db, err := engine.OpenDB(*dbPath, 384, storage.MetricCosine, storage.QuantizeNone)
+	if err != nil {
+		fmt.Printf("Error opening db: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	f, err := os.Create(*outFile)
+	if err != nil {
+		fmt.Printf("Failed to create dump file: %v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	queryRes, err := db.ExecuteSQL("SELECT * FROM documents LIMIT 1000000", nil)
+	if err != nil {
+		fmt.Printf("Query error: %v\n", err)
+		os.Exit(1)
+	}
+
+	count := 0
+	for _, row := range queryRes.Rows {
+		b, _ := json.Marshal(row)
+		f.Write(b)
+		f.WriteString("\n")
+		count++
+	}
+
+	fmt.Printf("Dumped %d documents to %s\n", count, *outFile)
+}
+
+func cmdRestore(args []string) {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	dbPath := fs.String("db", "restored.embdb", "Path to target .embdb file")
+	inFile := fs.String("in", "dump.jsonl", "Input dump file path")
+	dim := fs.Int("dim", 384, "Vector dimension")
+	fs.Parse(args)
+
+	f, err := os.Open(*inFile)
+	if err != nil {
+		fmt.Printf("Failed to open dump file: %v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	db, err := engine.OpenDB(*dbPath, *dim, storage.MetricCosine, storage.QuantizeNone)
+	if err != nil {
+		fmt.Printf("Error creating db: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	embedder := embeddings.NewDeterministicAdapter(*dim)
+	scanner := bufio.NewScanner(f)
+	count := 0
+	start := time.Now()
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			continue
+		}
+
+		key, _ := row["key"].(string)
+		text, _ := row["text"].(string)
+		meta, _ := row["metadata"].(map[string]any)
+
+		vec, _ := embedder.Embed(context.Background(), text)
+		_ = db.Insert(&engine.Document{
+			Key:      key,
+			Text:     text,
+			Vector:   vec,
+			Metadata: meta,
+		})
+		count++
+	}
+
+	_ = db.Sync()
+	fmt.Printf("Restored %d documents to %s in %s\n", count, *dbPath, time.Since(start))
+}
+
+func cmdShell(args []string) {
+	fs := flag.NewFlagSet("shell", flag.ExitOnError)
+	dbPath := fs.String("db", "data.embdb", "Path to .embdb file")
+	dim := fs.Int("dim", 384, "Vector dimension")
+	fs.Parse(args)
+
+	db, err := engine.OpenDB(*dbPath, *dim, storage.MetricCosine, storage.QuantizeNone)
+	if err != nil {
+		fmt.Printf("Error opening db: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	embedder := embeddings.NewDeterministicAdapter(*dim)
+
+	fmt.Print(banner)
+	fmt.Printf("Connected to: %s\n", *dbPath)
+	fmt.Println("Type SQL query (e.g. SELECT * FROM documents LIMIT 5;)")
+	fmt.Println("Type .help for special commands, .exit to quit.")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Print("embdb> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, ".") {
+			switch line {
+			case ".help":
+				fmt.Println("\nShell Commands:")
+				fmt.Println("  .help        Show this help message")
+				fmt.Println("  .stats       Show database statistics")
+				fmt.Println("  .schema      Show columns in documents table")
+				fmt.Println("  .exit, .quit Exit the shell")
+			case ".stats":
+				stats := db.Stats()
+				fmt.Printf("Total Documents: %d | Pages: %d | Vector Dim: %d | Graph Nodes: %d\n",
+					stats.TotalDocuments, stats.TotalPages, stats.VectorDim, stats.GraphNodes)
+			case ".schema":
+				fmt.Println("Table 'documents': [id uint64, key string, text string, vector []float32, metadata object, score float32]")
+			case ".exit", ".quit":
+				return
+			default:
+				fmt.Printf("Unknown command: %s. Type .help for assistance.\n", line)
+			}
+			continue
+		}
+
+		// Execute SQL Query
+		cleanSQL := strings.TrimSuffix(line, ";")
+		start := time.Now()
+		qVec, _ := embedder.Embed(context.Background(), cleanSQL)
+		res, err := db.ExecuteSQL(cleanSQL, qVec)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+
+		if len(res.Rows) == 0 {
+			fmt.Printf("Empty set (%s)\n", elapsed)
+			continue
+		}
+
+		// Print ASCII Table
+		renderTable(res)
+		fmt.Printf("%d rows in set (%s)\n\n", len(res.Rows), elapsed)
+	}
+}
+
+func renderTable(res *engine.QueryResult) {
+	if len(res.Rows) == 0 {
+		return
+	}
+
+	cols := res.Columns
+	if len(cols) == 1 && cols[0] == "*" {
+		cols = []string{"id", "key", "text", "score"}
+	}
+
+	// Calculate column widths
+	widths := make([]int, len(cols))
+	for i, c := range cols {
+		widths[i] = len(c)
+	}
+
+	for _, r := range res.Rows {
+		for i, c := range cols {
+			valStr := fmt.Sprintf("%v", r[c])
+			if len(valStr) > 40 {
+				valStr = valStr[:37] + "..."
+			}
+			if len(valStr) > widths[i] {
+				widths[i] = len(valStr)
+			}
+		}
+	}
+
+	// Print Border
+	printSep := func() {
+		fmt.Print("+")
+		for _, w := range widths {
+			fmt.Print(strings.Repeat("-", w+2) + "+")
+		}
+		fmt.Println()
+	}
+
+	printSep()
+	// Print Header
+	fmt.Print("|")
+	for i, c := range cols {
+		fmt.Printf(" %-*s |", widths[i], strings.ToUpper(c))
+	}
+	fmt.Println()
+	printSep()
+
+	// Print Rows
+	for _, r := range res.Rows {
+		fmt.Print("|")
+		for i, c := range cols {
+			valStr := fmt.Sprintf("%v", r[c])
+			if len(valStr) > 40 {
+				valStr = valStr[:37] + "..."
+			}
+			fmt.Printf(" %-*s |", widths[i], valStr)
+		}
+		fmt.Println()
+	}
+	printSep()
 }
